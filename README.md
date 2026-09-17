@@ -126,5 +126,4 @@ sudo iptables -D INPUT -s <attacker-ip> -j DROP
 
 ## Demo
 
-*(Add a screenshot or short screen recording of the dashboard catching a
-simulated scan here.)*
+* <img width="2880" height="1710" alt="c1840db5-1f38-4bf4-bd96-e9f5e36024d3" src="https://github.com/user-attachments/assets/5dbedd30-8966-4487-bed6-5f27b2aa992e" />*
