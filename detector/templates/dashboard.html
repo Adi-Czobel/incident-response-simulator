@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Incident Response Dashboard</title>
+    <style>
+        body { font-family: sans-serif; margin: 2em; background: #f4f4f4; }
+        table { width: 100%; border-collapse: collapse; background: white; }
+        th, td { padding: 10px; border-bottom: 1px solid #ddd; text-align: left; }
+        th { background: #222; color: white; }
+        .alert-row { background: #ffe5e5; }
+    </style>
+</head>
+<body>
+    <h1>Incident Response Dashboard</h1>
+    <table id="incidents">
+        <tr><th>Time</th><th>Type</th><th>Source IP</th><th>Detail</th></tr>
+    </table>
+    <script>
+        async function refresh() {
+            var res = await fetch('/api/incidents');
+            var data = await res.json();
+            var table = document.getElementById('incidents');
+            table.innerHTML = '<tr><th>Time</th><th>Type</th><th>Source IP</th><th>Detail</th></tr>';
+            data.reverse().forEach(function(i) {
+                table.innerHTML += '<tr class="alert-row"><td>' + i.detected_at + '</td><td>' + i.type + '</td><td>' + i.source_ip + '</td><td>' + i.detail + '</td></tr>';
+            });
+        }
+        refresh();
+        setInterval(refresh, 3000);
+    </script>
+</body>
+</html>
