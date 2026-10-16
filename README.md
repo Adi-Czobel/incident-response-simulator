@@ -52,78 +52,81 @@ window, it treats that as a port scan and:
 `app.py` (Flask) serves a dashboard that polls `/api/incidents` every 3
 seconds and renders the incident log as a live-updating table.
 
-## Detection logic
+## How the detection works
 
-A source IP is flagged when it touches **10 or more distinct destination ports within a
-5-second sliding window** (`SCAN_THRESHOLD = 10`, `WINDOW = 5` in `detector.py`). Only TCP
-packets with the SYN flag set are counted; the window is maintained by discarding hits older
-than `WINDOW` on every packet, and a source's counter is reset after it fires so one scan
-produces one alert rather than a flood.
+The rule is simple: if one IP hits **10 or more different ports within 5 seconds**, treat it
+as a scan. Those two numbers are `SCAN_THRESHOLD` and `WINDOW` at the top of `detector.py`.
 
-**Why these thresholds.** Legitimate clients talk to a small, stable set of ports. Ten
-distinct ports inside five seconds sits well clear of normal application behaviour while
-staying tight enough to catch `nmap`'s default timing. The numbers were chosen by judgement
-for a quiet lab network, not derived from measured traffic — on a real network they would need
-to be tuned against an actual baseline, and the right way to pick them would be to measure the
-false-positive rate across a week of normal traffic first.
+Only TCP packets with the SYN flag set get counted. Every time a packet arrives, hits older
+than 5 seconds get dropped from the list, which is what makes the window slide. After an
+alert fires, that IP's counter resets so one scan produces one alert instead of a stream of
+them.
 
-### What this misses, by design
+I picked 10 and 5 by hand for a quiet lab network. Normal clients only talk to a handful of
+ports, so 10 in five seconds is well above anything legitimate, and it is still fast enough
+to catch nmap at its default speed. On a real network you would want to measure a week of
+normal traffic first and tune from that, rather than guessing like I did here.
 
-| Evasion | Why it defeats this rule |
-|---|---|
-| Slow scan (`nmap -T1`, one port every 30s) | Never accumulates 10 ports inside a 5s window |
-| Distributed scan from multiple sources | The counter is per source IP; no single source crosses the threshold |
-| FIN / NULL / Xmas scans (`nmap -sF -sN -sX`) | `detector.py` only counts packets with the SYN flag set |
-| UDP scans (`nmap -sU`) | The sniffer filters on `tcp` |
-| Targeting one known service | A single port is touched; there is no scan signature to see |
-| Source IP spoofing | Blocks the spoofed address, not the attacker |
+### Ways around it
 
-### The spoofing problem
+This rule is easy to evade, and it is worth being clear about how:
 
-The last row is the one that matters. Because the response is an automatic, permanent
-`iptables -A INPUT -s <ip> -j DROP` with no allowlist and no expiry, anyone who can spoof a
-source address can make this tool deny service on their behalf: spoof the default gateway, a
-DNS resolver, or a monitoring host, trigger the threshold, and the detector firewalls off its
-own infrastructure.
+| Evasion | Why it works |
+| ------- | ------------ |
+| Scan slowly (`nmap -T1`) | Never reaches 10 ports inside a 5 second window |
+| Scan from several machines at once | The count is per IP, so no single one crosses the line |
+| FIN, NULL or Xmas scans | Those do not set the SYN flag, and I only count SYN packets |
+| UDP scans | The sniffer only looks at TCP |
+| Go straight for one known port | One port is not a scan, so there is nothing to spot |
+| Fake the source IP | The block lands on the fake address, not the real attacker |
 
-This is a general property of automated blocking, not a bug unique to this project, and it is
-why production systems gate auto-blocking behind:
+### Why automatic blocking is risky
 
-- an **allowlist** of infrastructure that must never be blocked (gateway, DNS, management, LB)
-- **time-boxed** rules that expire, rather than permanent DROPs
-- **reputation or confidence scoring** so a single heuristic cannot trigger a block alone
-- **human confirmation** above a blast-radius threshold
+That last row is the important one. When the detector fires it runs
+`iptables -A INPUT -s <ip> -j DROP`, with no allowlist and no expiry. So if someone fakes
+their source IP, they can pick which address gets blocked. Fake the default gateway or the
+DNS server, trigger the threshold, and the detector firewalls off the network it is
+supposed to be protecting. The tool becomes the attack.
 
-None of those are implemented here. The project demonstrates the detect → log → alert →
-respond loop; it is not safe to point at anything but an isolated lab, which is why the
-instructions below are explicit about that.
+This is true of automatic blocking in general, not just this project. Real systems deal with
+it by:
 
-### Other known limitations
+- keeping an allowlist of things that must never be blocked (gateway, DNS, management hosts)
+- making block rules expire after a while instead of being permanent
+- requiring more than one signal before acting
+- asking a human first when the block would affect a lot of traffic
 
-- `port_hits` retains an entry for every source IP observed, so memory grows unbounded over a
-  long run. Fine for a lab, not for a long-lived sensor; it needs periodic eviction.
-- Blocks are tracked in an in-process `set`, so restarting the detector loses the record of
-  what it has already blocked while the `iptables` rules themselves persist.
-- Detection is heuristic, not signature- or behaviour-based, and there is no allowlisting of
-  known scanners such as internal vulnerability management.
+None of that is here. This project is a demonstration of the detect, log, alert, respond
+loop, which is why the instructions below are strict about only running it in an isolated
+lab.
 
-## Scope and threat model
+### Other rough edges
 
-**Models:** an unauthenticated attacker on the same L2 segment performing TCP port
-reconnaissance as a precursor to exploitation.
+- `port_hits` keeps an entry for every IP it has ever seen, so memory grows over a long run.
+  Fine for a lab, but a real sensor would need to clear out old entries.
+- The list of blocked IPs lives in memory, so restarting the detector forgets what it has
+  already blocked even though the iptables rules are still there.
+- There is no allowlist, so something like an internal vulnerability scanner would get
+  blocked along with everything else.
 
-**Does not model:** authenticated insiders, application-layer attacks, encrypted command and
-control, lateral movement after a foothold, or any non-TCP protocol.
+## What it does and does not cover
 
-**Deliberately simulated rather than real:**
+**It covers:** someone on the same network segment scanning ports to work out what is
+running, usually as a first step before trying to break in.
 
-| Component | Production equivalent | Why simulated here |
-|---|---|---|
-| Alerting | PagerDuty, SNS, Slack webhook | No external credentials needed to demonstrate the pipeline |
-| Log sink | Splunk, Elastic, Sentinel | JSON lines on disk keeps it dependency-free and inspectable |
+**It does not cover:** attacks over anything other than TCP, attacks against the application
+itself, an attacker who already has valid credentials, or anything that happens after
+someone is already inside.
 
-The incident log is newline-delimited JSON, one object per line, so it pipes directly into any
-SIEM that ingests NDJSON.
+Two parts are deliberately faked rather than real:
+
+| Part | What it would be in production | Why it is faked here |
+| ---- | ------------------------------ | -------------------- |
+| Alerting | PagerDuty, SNS, or a Slack webhook | No external accounts needed to show the pipeline working |
+| Log storage | Splunk, Elastic, or Sentinel | A plain file keeps the project easy to run and read |
+
+The incident log is one JSON object per line, which is the format most SIEM tools ingest
+directly, so pointing a real one at it would not take much.
 
 ## Project layout
 
